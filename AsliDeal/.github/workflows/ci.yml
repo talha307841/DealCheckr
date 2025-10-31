@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+
+      - name: Run backend tests
+        run: |
+          cd backend
+          pytest tests/unit
+
+      - name: Build Chrome extension
+        run: |
+          cd chrome-extension
+          npm install
+          npm run build
+
+      - name: Run Chrome extension tests
+        run: |
+          cd chrome-extension
+          npm test
+
+      - name: Deploy
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cd scripts
+          ./deploy.sh

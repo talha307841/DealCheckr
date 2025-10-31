@@ -1,0 +1,16 @@
+name: AsliDeal
+version: 0.1.0
+description: A Helm chart for deploying the AsliDeal application, which verifies discount offers on Pakistani e-commerce sites.
+type: application
+maintainers:
+  - name: Your Name
+    email: your.email@example.com
+keywords:
+  - discount
+  - e-commerce
+  - verification
+  - helm
+  - fastapi
+sources:
+  - https://github.com/yourusername/AsliDeal
+dependencies: []
