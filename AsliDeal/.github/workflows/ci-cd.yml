@@ -1,0 +1,129 @@
+name: CI CD - FastAPI to EC2 via ECR
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  BACKEND_DIR: backend
+  DOCKERFILE: backend/Dockerfile
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/backend/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ${BACKEND_DIR}/requirements.txt
+
+      - name: Run pytest
+        working-directory: ./${{ env.BACKEND_DIR }}
+        run: |
+          PYTHONPATH=. pytest -q
+
+  build_and_push:
+    name: Build and push Docker image to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get AWS Account ID
+        id: aws-account
+        run: |
+          echo "account=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
+
+      - name: Set image variables
+        id: vars
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::8}
+          IMAGE_URI=${{ steps.aws-account.outputs.account }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+      - name: Login to ECR
+        run: |
+          aws ecr create-repository --repository-name ${{ secrets.ECR_REPOSITORY }} --region ${{ secrets.AWS_REGION }} || true
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.vars.outputs.IMAGE_URI }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build and push image (with layer cache)
+        uses: docker/build-push-action@v4
+        with:
+          context: ./${{ env.BACKEND_DIR }}
+          file: ${DOCKERFILE}
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.IMAGE_URI }}:${{ steps.vars.outputs.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ steps.vars.outputs.IMAGE_URI }}:cache
+          cache-to: type=registry,ref=${{ steps.vars.outputs.IMAGE_URI }}:cache,mode=max
+
+      - name: Set output image
+        id: set-output
+        run: |
+          echo "IMAGE_FULL=${{ steps.vars.outputs.IMAGE_URI }}:${{ steps.vars.outputs.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy to EC2 via SSH
+    needs: build_and_push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy deploy files to EC2
+        uses: appleboy/scp-action@v0.1.8
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          source: "deploy.sh,docker-compose.yml"
+          target: "/home/${{ secrets.EC2_USER }}/aslideal_deploy"
+
+      - name: Run remote deploy script
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+            cd /home/${{ secrets.EC2_USER }}/aslideal_deploy
+            chmod +x deploy.sh
+            ./deploy.sh ${{ steps.set-output.outputs.IMAGE_FULL }}
